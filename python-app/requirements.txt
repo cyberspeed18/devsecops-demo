@@ -1,0 +1,4 @@
+Flask==3.0.3
+gunicorn==23.0.0
+# INTENTIONALLY OLD (known CVEs) so that pip-audit / Trivy / Black Duck have findings.
+requests==2.25.1
