@@ -1,0 +1,18 @@
+{
+  "name": "demo-node-app",
+  "version": "1.0.0",
+  "description": "Demo Node.js app for the DevSecOps pipeline (GitHub + Jenkins)",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.21.0",
+    "lodash": "4.18.1"
+  }
+}
