@@ -255,7 +255,7 @@ pipeline {
                         docker run --rm --network ${NET} \
                             -v "$WORKSPACE/reports":/zap/wrk:rw \
                             ghcr.io/zaproxy/zaproxy:stable zap-baseline.py \
-                            -t http://app:${APP_PORT} -r zap-node.html -I
+                            -t http://app:${APP_PORT} -r zap-node.html -J zap-node.json -I
                     '''
                 }
             }
@@ -283,6 +283,16 @@ pipeline {
                 docker rm -f ${CONTAINER} >/dev/null 2>&1 || true
                 docker network rm ${NET} >/dev/null 2>&1 || true
             '''
+            // สร้างหน้า HTML สรุปผล scan (ไฟล์ดิบยังอยู่ใน reports/ เหมือนเดิม) - ถ้าพังก็ไม่กระทบ build
+            script {
+                def sonarUrl = params.RUN_SONAR ? "https://sonarcloud.io/dashboard?id=${params.SONAR_PROJECT_KEY}" : ''
+                sh """
+                    mkdir -p reports
+                    docker run --rm -u "\$(id -u):\$(id -g)" -e HOME=/tmp -v "\$WORKSPACE":/w -w /w python:3.12-slim \\
+                        python scripts/make-report.py --reports reports --out reports/summary.html \\
+                        --app node-app --build ${env.BUILD_NUMBER} --sonar-url "${sonarUrl}" || echo "report generation skipped"
+                """
+            }
             archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
         }
         success  { echo 'Pipeline succeeded' }
