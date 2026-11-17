@@ -3,14 +3,21 @@
 // Job type    : Pipeline script from SCM   (Script Path = node-app/Jenkinsfile)
 // Requires    : Docker on the Jenkins host, user "jenkins" in group "docker"
 //               (run scripts/setup-jenkins-host.sh). No Jenkins plugins needed.
-//               SonarQube Cloud is called through Docker (no plugin, no webhook):
-//               needs a Secret-text credential with ID "sonar-token".
+//               Customer-selected tools are called through Docker / REST (no plugin, no webhook).
+//               Secret-text credentials (System > Global):
+//                 sonar-token        -> RUN_SONAR  (SonarQube Server / Community / Cloud)
+//                 blackduck-token    -> SCA_TOOL = blackduck
+//                 acunetix-api-key   -> DAST_TOOL = acunetix
+//                 registry-cred      -> PUSH_IMAGE (username + password)
 //
 // Stages
-//   Checkout -> Secret scan -> Install & unit test -> SCA (npm audit)
-//   -> SAST (Semgrep) -> [SAST SonarQube Cloud] -> Dockerfile lint -> Docker build
-//   -> Image scan (Trivy) -> SBOM (Syft) -> Run container + smoke test
-//   -> [DAST ZAP baseline] -> [Push image]
+//   Checkout -> Secret scan (Gitleaks) -> Install & unit test
+//   -> SCA   : npm audit  OR  Black Duck (Synopsys Detect)          [SCA_TOOL]
+//   -> SAST  : Semgrep, + [SonarQube Server/Community]              [RUN_SONAR]
+//   -> Dockerfile lint (Hadolint) -> Docker build -> Image scan (Trivy) -> SBOM (Syft)
+//   -> Run container + smoke test
+//   -> DAST  : OWASP ZAP baseline  OR  Acunetix (REST API)          [DAST_TOOL]
+//   -> [Push image]
 //
 // STRICT_MODE = false : findings turn the stage/build UNSTABLE (yellow)
 // STRICT_MODE = true  : findings FAIL the build (red)
@@ -38,11 +45,29 @@ pipeline {
 
     parameters {
         booleanParam(name: 'STRICT_MODE', defaultValue: false, description: 'เปิด = เจอช่องโหว่แล้ว build FAIL / ปิด = แค่ UNSTABLE (สีเหลือง)')
-        booleanParam(name: 'RUN_SONAR',   defaultValue: false, description: 'SonarQube Cloud via Docker (ต้องมี credentials sonar-token และปิด Automatic Analysis ในโปรเจกต์)')
-        string(name: 'SONAR_HOST_URL',    defaultValue: 'https://sonarcloud.io', description: 'URL ของ SonarQube (Cloud = https://sonarcloud.io)')
-        string(name: 'SONAR_ORG',         defaultValue: 'cyberspeed18', description: 'organization key (Cloud เท่านั้น / Server เว้นว่าง)')
-        string(name: 'SONAR_PROJECT_KEY', defaultValue: 'cyberspeed18_demo-node-app', description: 'Project key ต้องตรงกับที่แสดงในหน้าโปรเจกต์บน SonarQube')
-        booleanParam(name: 'RUN_ZAP',     defaultValue: true,  description: 'DAST ด้วย OWASP ZAP baseline (ฟรี ใช้แทน Acunetix ตอน demo)')
+
+        // ---- SAST: SonarQube Server / Community (ของลูกค้า) ----
+        booleanParam(name: 'RUN_SONAR',   defaultValue: false, description: 'SonarQube ผ่าน Docker (ต้องมี credentials sonar-token)')
+        string(name: 'SONAR_HOST_URL',    defaultValue: 'http://sonarqube.example.local:9000', description: 'URL ของ SonarQube Server/Community (Cloud = https://sonarcloud.io)')
+        string(name: 'SONAR_ORG',         defaultValue: '', description: 'organization key เฉพาะ SonarQube Cloud / Server และ Community เว้นว่าง')
+        string(name: 'SONAR_PROJECT_KEY', defaultValue: 'demo-node-app', description: 'Project key ต้องตรงกับโปรเจกต์บน SonarQube')
+
+        // ---- SCA: เลือก npm audit หรือ Black Duck ----
+        choice(name: 'SCA_TOOL', choices: ['npm-audit', 'blackduck'], description: 'เครื่องมือ SCA (blackduck ต้องมี credentials blackduck-token)')
+        string(name: 'BLACKDUCK_URL',     defaultValue: 'https://blackduck.example.local', description: 'URL ของ Black Duck server')
+        string(name: 'BLACKDUCK_PROJECT', defaultValue: 'demo-node-app', description: 'ชื่อ project บน Black Duck')
+        string(name: 'BLACKDUCK_VERSION', defaultValue: 'main', description: 'ชื่อ version บน Black Duck')
+        booleanParam(name: 'BLACKDUCK_TRUST_CERT', defaultValue: true, description: 'เชื่อ cert ของ Black Duck (กรณี self-signed)')
+        string(name: 'BLACKDUCK_FAIL_ON', defaultValue: 'CRITICAL,BLOCKER', description: 'policy severity ที่ทำให้ stage fail')
+
+        // ---- DAST: เลือก ZAP หรือ Acunetix ----
+        choice(name: 'DAST_TOOL', choices: ['zap', 'acunetix', 'none'], description: 'เครื่องมือ DAST (acunetix ต้องมี credentials acunetix-api-key)')
+        string(name: 'ACUNETIX_URL',        defaultValue: 'https://acunetix.example.local:3443', description: 'URL ของ Acunetix server')
+        string(name: 'ACUNETIX_PROFILE_ID', defaultValue: '11111111-1111-1111-1111-111111111111', description: 'scan profile (ค่าเริ่มต้น = Full Scan)')
+        string(name: 'ACUNETIX_FAIL_ON',    defaultValue: 'high', description: 'critical / high / medium / low / none')
+        string(name: 'DAST_HOST',           defaultValue: '', description: 'IP/ชื่อของเครื่อง Jenkins ที่ Acunetix เข้าถึงได้ (ใช้กับ acunetix)')
+        string(name: 'DAST_HOST_PORT',      defaultValue: '3100', description: 'port บนเครื่อง Jenkins ที่เปิดให้ Acunetix สแกนแอป')
+
         booleanParam(name: 'PUSH_IMAGE',  defaultValue: false, description: 'Push image ไป registry (ต้องมี credentials registry-cred)')
         string(name: 'REGISTRY', defaultValue: 'ghcr.io/your-org', description: 'ใช้เมื่อเปิด PUSH_IMAGE')
     }
@@ -104,6 +129,7 @@ pipeline {
         }
 
         stage('SCA - npm audit') {
+            when { expression { params.SCA_TOOL == 'npm-audit' } }
             steps {
                 dir(env.APP_DIR) {
                     sh '''
@@ -119,6 +145,38 @@ pipeline {
                                 -v "$PWD":/app -w /app \
                                 ${NODE_IMAGE} npm audit --omit=dev --audit-level=high
                         '''
+                    }
+                }
+            }
+        }
+
+        stage('SCA - Black Duck') {
+            when { expression { params.SCA_TOOL == 'blackduck' } }
+            steps {
+                dir(env.APP_DIR) {
+                    withCredentials([string(credentialsId: 'blackduck-token', variable: 'BD_TOKEN')]) {
+                        softFail {
+                            // Synopsys Detect (ต้องมี package-lock.json หรือ node_modules ซึ่ง stage Install สร้างไว้แล้ว)
+                            sh '''
+                                TRUST=""
+                                if [ "$BLACKDUCK_TRUST_CERT" = "true" ]; then TRUST="--blackduck.trust.cert=true"; fi
+                                docker run --rm \
+                                    -u "$(id -u):$(id -g)" -e HOME=/tmp \
+                                    -e BD_TOKEN="$BD_TOKEN" -e BD_URL="$BLACKDUCK_URL" \
+                                    -e BD_PROJECT="$BLACKDUCK_PROJECT" -e BD_VERSION="$BLACKDUCK_VERSION" \
+                                    -e BD_FAIL_ON="$BLACKDUCK_FAIL_ON" -e BD_TRUST="$TRUST" \
+                                    -v "$PWD":/src -w /src \
+                                    eclipse-temurin:17-jre bash -c '
+                                        curl -fsSL https://detect.blackduck.com/detect10.sh -o /tmp/detect.sh &&
+                                        bash /tmp/detect.sh \
+                                            --blackduck.url="$BD_URL" --blackduck.api.token="$BD_TOKEN" $BD_TRUST \
+                                            --detect.project.name="$BD_PROJECT" --detect.project.version.name="$BD_VERSION" \
+                                            --detect.tools=DETECTOR --detect.npm.include.dev.dependencies=false \
+                                            --detect.policy.check.fail.on.severities="$BD_FAIL_ON" \
+                                            --detect.output.path=/tmp/detect-out --detect.tools.output.path=/tmp/detect-tools
+                                    '
+                            '''
+                        }
                     }
                 }
             }
@@ -142,18 +200,17 @@ pipeline {
             }
         }
 
-        stage('SAST - SonarQube Cloud') {
+        stage('SAST - SonarQube') {
             when { expression { params.RUN_SONAR } }
             steps {
                 dir(env.APP_DIR) {
                     withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
                         softFail {
-                            // ไม่ใช้ plugin / webhook: scanner รอผล Quality Gate เอง
+                            // ไม่ใช้ plugin / webhook: scanner รอผล Quality Gate เอง (ใช้ได้ทั้ง Server / Community / Cloud)
                             sh '''
-                                SONAR_HOST_URL="${SONAR_HOST_URL:-https://sonarcloud.io}"
-                                SONAR_ORG="${SONAR_ORG:-cyberspeed18}"
-                                SONAR_PROJECT_KEY="${SONAR_PROJECT_KEY:-cyberspeed18_demo-node-app}"
-                                echo "Sonar: url=$SONAR_HOST_URL org=$SONAR_ORG project=$SONAR_PROJECT_KEY"
+                                echo "Sonar: url=$SONAR_HOST_URL org=${SONAR_ORG:-<none>} project=$SONAR_PROJECT_KEY"
+                                ORG_ARG=""
+                                if [ -n "$SONAR_ORG" ]; then ORG_ARG="-Dsonar.organization=$SONAR_ORG"; fi
 
                                 docker run --rm \
                                     -u "$(id -u):$(id -g)" \
@@ -162,7 +219,7 @@ pipeline {
                                     -v "$PWD":/usr/src \
                                     sonarsource/sonar-scanner-cli:latest \
                                     -Dsonar.host.url="$SONAR_HOST_URL" \
-                                    -Dsonar.organization="$SONAR_ORG" \
+                                    $ORG_ARG \
                                     -Dsonar.projectKey="$SONAR_PROJECT_KEY" \
                                     -Dsonar.working.directory=/tmp/sonar-work \
                                     -Dsonar.sources=src -Dsonar.tests=test \
@@ -230,9 +287,11 @@ pipeline {
 
         stage('Run Container & Smoke Test') {
             steps {
+                // Acunetix อยู่นอกเครื่อง Jenkins จึงต้องเปิด port ออกมาให้สแกนได้
+                withEnv(["PUBLISH_ARGS=" + (params.DAST_TOOL == 'acunetix' ? '-p ' + params.DAST_HOST_PORT + ':' + env.APP_PORT : '')]) {
                 sh '''
                     docker network create ${NET}
-                    docker run -d --name ${CONTAINER} --network ${NET} --network-alias app ${IMAGE}
+                    docker run -d --name ${CONTAINER} --network ${NET} --network-alias app $PUBLISH_ARGS ${IMAGE}
                     for i in $(seq 1 20); do
                         if docker run --rm --network ${NET} curlimages/curl:latest -fsS http://app:${APP_PORT}/health; then
                             echo "smoke test OK"
@@ -244,11 +303,12 @@ pipeline {
                     docker logs ${CONTAINER}
                     exit 1
                 '''
+                }
             }
         }
 
         stage('DAST - OWASP ZAP baseline') {
-            when { expression { params.RUN_ZAP } }
+            when { expression { params.DAST_TOOL == 'zap' } }
             steps {
                 softFail {
                     sh '''
@@ -257,6 +317,26 @@ pipeline {
                             ghcr.io/zaproxy/zaproxy:stable zap-baseline.py \
                             -t http://app:${APP_PORT} -r zap-node.html -J zap-node.json -I
                     '''
+                }
+            }
+        }
+
+        stage('DAST - Acunetix') {
+            when { expression { params.DAST_TOOL == 'acunetix' } }
+            steps {
+                withCredentials([string(credentialsId: 'acunetix-api-key', variable: 'ACUNETIX_API_KEY')]) {
+                    softFail {
+                        // เรียก REST API: สร้าง target -> สั่ง scan -> รอจนเสร็จ -> เก็บผลที่ reports/acunetix.json
+                        sh '''
+                            docker run --rm \
+                                -u "$(id -u):$(id -g)" -e HOME=/tmp -e ACUNETIX_API_KEY="$ACUNETIX_API_KEY" -e BUILD_TAG="$BUILD_TAG" \
+                                -v "$WORKSPACE":/w -w /w python:3.12-slim \
+                                python scripts/acunetix-scan.py \
+                                    --url "$ACUNETIX_URL" --target "http://${DAST_HOST}:${DAST_HOST_PORT}" \
+                                    --profile "$ACUNETIX_PROFILE_ID" --fail-on "$ACUNETIX_FAIL_ON" \
+                                    --out reports/acunetix.json --insecure
+                        '''
+                    }
                 }
             }
         }
@@ -285,12 +365,13 @@ pipeline {
             '''
             // สร้างหน้า HTML สรุปผล scan (ไฟล์ดิบยังอยู่ใน reports/ เหมือนเดิม) - ถ้าพังก็ไม่กระทบ build
             script {
-                def sonarUrl = params.RUN_SONAR ? "https://sonarcloud.io/dashboard?id=${params.SONAR_PROJECT_KEY}" : ''
+                def sonarUrl = params.RUN_SONAR ? "${params.SONAR_HOST_URL}/dashboard?id=${params.SONAR_PROJECT_KEY}" : ''
+                def bdUrl    = params.SCA_TOOL == 'blackduck' ? params.BLACKDUCK_URL : ''
                 sh """
                     mkdir -p reports
                     docker run --rm -u "\$(id -u):\$(id -g)" -e HOME=/tmp -v "\$WORKSPACE":/w -w /w python:3.12-slim \\
                         python scripts/make-report.py --reports reports --out reports/summary.html \\
-                        --app node-app --build ${env.BUILD_NUMBER} --sonar-url "${sonarUrl}" || echo "report generation skipped"
+                        --app node-app --build ${env.BUILD_NUMBER} --sonar-url "${sonarUrl}" --blackduck-url "${bdUrl}" || echo "report generation skipped"
                 """
             }
             archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
