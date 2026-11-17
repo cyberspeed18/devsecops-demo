@@ -1,6 +1,6 @@
 // =====================================================================
-// Jenkinsfile : node-app  (Node.js + Express)
-// Job type    : Pipeline script from SCM   (Script Path = node-app/Jenkinsfile)
+// Jenkinsfile : ymh-node-app  (Node.js + Express)
+// Job type    : Pipeline script from SCM   (Script Path = ymh-node-app/Jenkinsfile)
 // Requires    : Docker on the Jenkins host, user "jenkins" in group "docker"
 //               (run scripts/setup-jenkins-host.sh). No Jenkins plugins needed.
 //               Customer-selected tools are called through Docker / REST (no plugin, no webhook).
@@ -50,12 +50,12 @@ pipeline {
         booleanParam(name: 'RUN_SONAR',   defaultValue: false, description: 'SonarQube ผ่าน Docker (ต้องมี credentials sonar-token)')
         string(name: 'SONAR_HOST_URL',    defaultValue: 'http://sonarqube.example.local:9000', description: 'URL ของ SonarQube Server/Community (Cloud = https://sonarcloud.io)')
         string(name: 'SONAR_ORG',         defaultValue: '', description: 'organization key เฉพาะ SonarQube Cloud / Server และ Community เว้นว่าง')
-        string(name: 'SONAR_PROJECT_KEY', defaultValue: 'demo-node-app', description: 'Project key ต้องตรงกับโปรเจกต์บน SonarQube')
+        string(name: 'SONAR_PROJECT_KEY', defaultValue: 'demo-ymh-node-app', description: 'Project key ต้องตรงกับโปรเจกต์บน SonarQube')
 
         // ---- SCA: เลือก npm audit หรือ Black Duck ----
         choice(name: 'SCA_TOOL', choices: ['npm-audit', 'blackduck'], description: 'เครื่องมือ SCA (blackduck ต้องมี credentials blackduck-token)')
         string(name: 'BLACKDUCK_URL',     defaultValue: 'https://blackduck.example.local', description: 'URL ของ Black Duck server')
-        string(name: 'BLACKDUCK_PROJECT', defaultValue: 'demo-node-app', description: 'ชื่อ project บน Black Duck')
+        string(name: 'BLACKDUCK_PROJECT', defaultValue: 'demo-ymh-node-app', description: 'ชื่อ project บน Black Duck')
         string(name: 'BLACKDUCK_VERSION', defaultValue: 'main', description: 'ชื่อ version บน Black Duck')
         booleanParam(name: 'BLACKDUCK_TRUST_CERT', defaultValue: true, description: 'เชื่อ cert ของ Black Duck (กรณี self-signed)')
         string(name: 'BLACKDUCK_FAIL_ON', defaultValue: 'CRITICAL,BLOCKER', description: 'policy severity ที่ทำให้ stage fail')
@@ -73,12 +73,12 @@ pipeline {
     }
 
     environment {
-        APP_DIR    = 'node-app'
+        APP_DIR    = 'ymh-node-app'
         APP_PORT   = '3000'
         NODE_IMAGE = 'node:20'
-        IMAGE      = "demo/node-app:${env.BUILD_NUMBER}"
-        NET        = "demo-net-node-${env.BUILD_NUMBER}"
-        CONTAINER  = "demo-node-${env.BUILD_NUMBER}"
+        IMAGE      = "demo/ymh-node-app:${env.BUILD_NUMBER}"
+        NET        = "demo-net-ymh-${env.BUILD_NUMBER}"
+        CONTAINER  = "demo-ymh-${env.BUILD_NUMBER}"
     }
 
     stages {
@@ -349,8 +349,8 @@ pipeline {
                                                   passwordVariable: 'REG_PASS')]) {
                     sh '''
                         echo "$REG_PASS" | docker login ${REGISTRY%%/*} -u "$REG_USER" --password-stdin
-                        docker tag ${IMAGE} ${REGISTRY}/demo-node-app:${BUILD_NUMBER}
-                        docker push ${REGISTRY}/demo-node-app:${BUILD_NUMBER}
+                        docker tag ${IMAGE} ${REGISTRY}/demo-ymh-node-app:${BUILD_NUMBER}
+                        docker push ${REGISTRY}/demo-ymh-node-app:${BUILD_NUMBER}
                     '''
                 }
             }
@@ -370,8 +370,8 @@ pipeline {
                 sh """
                     mkdir -p reports
                     docker run --rm -u "\$(id -u):\$(id -g)" -e HOME=/tmp -v "\$WORKSPACE":/w -w /w python:3.12-slim \\
-                        python scripts/make-report.py --reports reports --out reports/summary.html \\
-                        --app node-app --build ${env.BUILD_NUMBER} --sonar-url "${sonarUrl}" --blackduck-url "${bdUrl}" || echo "report generation skipped"
+                        python scripts/make-report-v2.py --reports reports --out reports/summary.html \\
+                        --app ymh-node-app --build ${env.BUILD_NUMBER} --sonar-url "${sonarUrl}" --blackduck-url "${bdUrl}" || echo "report generation skipped"
                 """
             }
             archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
