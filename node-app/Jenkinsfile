@@ -2,12 +2,13 @@
 // Jenkinsfile : node-app  (Node.js + Express)
 // Job type    : Pipeline script from SCM   (Script Path = node-app/Jenkinsfile)
 // Requires    : Docker on the Jenkins host, user "jenkins" in group "docker"
-//               (run scripts/setup-jenkins-host.sh). No extra Jenkins plugins
-//               are needed except for optional SonarQube / registry push.
+//               (run scripts/setup-jenkins-host.sh). No Jenkins plugins needed.
+//               SonarQube Cloud is called through Docker (no plugin, no webhook):
+//               needs a Secret-text credential with ID "sonar-token".
 //
 // Stages
 //   Checkout -> Secret scan -> Install & unit test -> SCA (npm audit)
-//   -> SAST (Semgrep) -> [SAST SonarQube] -> Dockerfile lint -> Docker build
+//   -> SAST (Semgrep) -> [SAST SonarQube Cloud] -> Dockerfile lint -> Docker build
 //   -> Image scan (Trivy) -> SBOM (Syft) -> Run container + smoke test
 //   -> [DAST ZAP baseline] -> [Push image]
 //
@@ -37,7 +38,10 @@ pipeline {
 
     parameters {
         booleanParam(name: 'STRICT_MODE', defaultValue: false, description: 'เปิด = เจอช่องโหว่แล้ว build FAIL / ปิด = แค่ UNSTABLE (สีเหลือง)')
-        booleanParam(name: 'RUN_SONAR',   defaultValue: false, description: 'SonarQube (ต้องมี plugin + server ชื่อ sonarqube)')
+        booleanParam(name: 'RUN_SONAR',   defaultValue: false, description: 'SonarQube Cloud via Docker (ต้องมี credentials sonar-token และปิด Automatic Analysis ในโปรเจกต์)')
+        string(name: 'SONAR_HOST_URL',    defaultValue: 'https://sonarcloud.io', description: 'URL ของ SonarQube (Cloud = https://sonarcloud.io)')
+        string(name: 'SONAR_ORG',         defaultValue: 'cyberspeed18', description: 'organization key (Cloud เท่านั้น / Server เว้นว่าง)')
+        string(name: 'SONAR_PROJECT_KEY', defaultValue: 'cyberspeed18_demo-node-app', description: 'Project key ต้องตรงกับที่แสดงในหน้าโปรเจกต์บน SonarQube')
         booleanParam(name: 'RUN_ZAP',     defaultValue: true,  description: 'DAST ด้วย OWASP ZAP baseline (ฟรี ใช้แทน Acunetix ตอน demo)')
         booleanParam(name: 'PUSH_IMAGE',  defaultValue: false, description: 'Push image ไป registry (ต้องมี credentials registry-cred)')
         string(name: 'REGISTRY', defaultValue: 'ghcr.io/your-org', description: 'ใช้เมื่อเปิด PUSH_IMAGE')
@@ -138,26 +142,29 @@ pipeline {
             }
         }
 
-        stage('SAST - SonarQube') {
+        stage('SAST - SonarQube Cloud') {
             when { expression { params.RUN_SONAR } }
             steps {
                 dir(env.APP_DIR) {
-                    withSonarQubeEnv('sonarqube') {
-                        sh '''
-                            docker run --rm \
-                                -u "$(id -u):$(id -g)" -e HOME=/tmp \
-                                -e SONAR_HOST_URL="$SONAR_HOST_URL" -e SONAR_TOKEN="$SONAR_AUTH_TOKEN" \
-                                -v "$PWD":/usr/src \
-                                sonarsource/sonar-scanner-cli:latest \
-                                -Dsonar.projectKey=demo-node-app \
-                                -Dsonar.sources=src -Dsonar.tests=test \
-                                -Dsonar.exclusions=node_modules/**
-                        '''
+                    withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
+                        softFail {
+                            // ไม่ใช้ plugin / webhook: scanner รอผล Quality Gate เอง
+                            sh '''
+                                docker run --rm \
+                                    -u "$(id -u):$(id -g)" -e HOME=/tmp \
+                                    -e SONAR_TOKEN="$SONAR_TOKEN" \
+                                    -v "$PWD":/usr/src \
+                                    sonarsource/sonar-scanner-cli:latest \
+                                    -Dsonar.host.url="$SONAR_HOST_URL" \
+                                    ${SONAR_ORG:+-Dsonar.organization=$SONAR_ORG} \
+                                    -Dsonar.projectKey="$SONAR_PROJECT_KEY" \
+                                    -Dsonar.sources=src -Dsonar.tests=test \
+                                    -Dsonar.exclusions=node_modules/** \
+                                    -Dsonar.qualitygate.wait=true \
+                                    -Dsonar.qualitygate.timeout=300
+                            '''
+                        }
                     }
-                }
-                // ต้องตั้ง webhook ใน SonarQube ชี้มาที่ <jenkins>/sonarqube-webhook/
-                timeout(time: 10, unit: 'MINUTES') {
-                    waitForQualityGate abortPipeline: params.STRICT_MODE
                 }
             }
         }
